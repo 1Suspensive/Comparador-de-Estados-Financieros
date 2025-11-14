@@ -79,7 +79,7 @@ class ExcelComparator:
         Ahora maneja rangos de fechas (ej: 'YYYY-MM-DD - YYYY-MM-DD').
         """
         try:
-            df = pd.read_excel(file_path, sheet_name=sheet_idx, header=None, nrows=50)
+            df = pd.read_excel(file_path, sheet_name=sheet_idx, header=None, nrows=120)
         except Exception as e:
             raise ValueError(f"No se pudo leer la hoja {sheet_idx+1} de {os.path.basename(file_path)}. Detalle: {e}")
 
@@ -151,7 +151,9 @@ class ExcelComparator:
         """
         Extrae los datos relevantes (título, actual, anterior) del DataFrame
         y los devuelve en una LISTA de diccionarios.
-        (Se eliminó la lógica de '4 filas en blanco' por ser propensa a errores).
+        
+        NUEVA REGLA: Deja de procesar si encuentra 4 filas consecutivas 
+        sin un título válido.
         """
         data_list = []
         if start_row is None:
@@ -174,9 +176,9 @@ class ExcelComparator:
 
         df_subset = df.iloc[start_row:]
         
-        # --- LÓGICA DE 4 FILAS EN BLANCO ELIMINADA ---
 
-        for _, row in df_subset.iterrows():
+        # --- ¡CAMBIO! Se reemplaza '_' por 'index' para capturar la fila ---
+        for index, row in df_subset.iterrows():
             title_parts = None
             original_full_title = None
             
@@ -190,7 +192,8 @@ class ExcelComparator:
                     original_full_title = cell_value.strip()
                     break 
             
-            # 2. Si se encontró título, extraer valores
+
+            # 3. Si se encontró título (y no hemos parado), extraer valores
             if title_parts and original_full_title:
                 number, text = title_parts
                 actual_val = pd.to_numeric(row.iloc[actual_col_idx], errors='coerce')
@@ -198,7 +201,8 @@ class ExcelComparator:
                 
                 data_list.append({
                     'num': number, 'text': text, 'full_title': original_full_title,
-                    'actual': actual_val, 'anterior': anterior_val, 'matched': False
+                    'actual': actual_val, 'anterior': anterior_val, 'matched': False,
+                    'row_num': index + 1  # <-- ¡AQUÍ SE GUARDA EL NÚMERO DE FILA (1-based)!
                 })
                 
         return data_list
@@ -232,14 +236,14 @@ class ExcelComparator:
         if abs_cliente_val == 0:
             if abs_salida_scaled != 0:
                 self.inconsistencias.append(
-                    f"[{context}] '{title}': Cliente es 0, pero Salida reporta valor (Abs Escalado: {abs_salida_scaled})."
+                    f"[{context}] '{title}': Cliente es 0, pero Salida reporta valor (Escalado: {abs_salida_scaled})."
                 )
             return 
 
         # Regla: Si Cliente (abs) NO es 0, deben coincidir EXACTAMENTE.
         if abs_cliente_val != abs_salida_scaled:
             self.inconsistencias.append(
-                f"[{context}] '{title}': DISCREPANCIA (Abs). Cliente: {abs_cliente_val}, Salida (Abs Escalado): {abs_salida_scaled}."
+                f"[{context}] '{title}': DISCREPANCIA . Cliente: {abs_cliente_val}, Salida (Escalado): {abs_salida_scaled}."
             )
 
     # --- MÉTODO compare ACTUALIZADO ---
@@ -250,7 +254,6 @@ class ExcelComparator:
         self.inconsistencias = []
 
         try:
-            # Sigue siendo útil tener los nombres de las hojas para los reportes
             cliente_sheet_names = pd.ExcelFile(self.cliente_path).sheet_names
             salida_sheet_names = pd.ExcelFile(self.salida_path).sheet_names
         except Exception as e:
@@ -261,34 +264,27 @@ class ExcelComparator:
             
             cliente_config = None
             salida_config = None
-            sheet_context = f"(Hoja Cliente idx {cliente_sheet_idx+1} vs Hoja Salida idx {salida_sheet_idx+1})" # Contexto por defecto
+            sheet_context = f"(Hoja Cliente idx {cliente_sheet_idx+1} vs Hoja Salida idx {salida_sheet_idx+1})" 
             
             try:
-                # Obtener nombres de hoja para un contexto más claro
                 cliente_sheet_name = cliente_sheet_names[cliente_sheet_idx]
                 salida_sheet_name = salida_sheet_names[salida_sheet_idx]
                 sheet_context = f"Hoja '{cliente_sheet_name}' vs Hoja '{salida_sheet_name}'"
 
-                # --- LÓGICA DE DETECCIÓN MOVIDA AQUÍ ---
-                # 1. Detectar columnas para ESTA HOJA de cliente
-                self.inconsistencias.append(f"\n[{sheet_context}] Detectando configuración...")
+                self.inconsistencias.append(f"\n")
                 cliente_config = self._detect_columns(self.cliente_path, cliente_sheet_idx)
                 self.inconsistencias.append(f"  -> Cliente OK: Títulos en '{cliente_config['title_range']}', Actual en '{cliente_config['actual_col']}'")
 
-                # 2. Detectar columnas para ESTA HOJA de salida
                 salida_config = self._detect_columns(self.salida_path, salida_sheet_idx)
                 self.inconsistencias.append(f"  -> Salida OK: Títulos en '{salida_config['title_range']}', Actual en '{salida_config['actual_col']}'")
                 
-                # 3. Cargar los DataFrames COMPLETOS
                 df_cliente = pd.read_excel(self.cliente_path, sheet_name=cliente_sheet_idx, header=None)
                 df_salida = pd.read_excel(self.salida_path, sheet_name=salida_sheet_idx, header=None)
             
             except Exception as e:
-                # Esto capturará fallos en la detección O en la lectura de la hoja
                 self.inconsistencias.append(f"ERROR: No se pudo procesar/detectar {sheet_context}. Detalle: {e}")
-                continue # Saltar al siguiente par de hojas
+                continue 
 
-            # 4. Encontrar filas de inicio (usando config por hoja)
             start_row_cliente = self._find_start_row(df_cliente, cliente_config['title_range'])
             start_row_salida = self._find_start_row(df_salida, salida_config['title_range'])
             
@@ -299,11 +295,8 @@ class ExcelComparator:
                 self.inconsistencias.append(f"ADVERTENCIA: No se encontraron títulos en {sheet_context} (Salida).")
                 continue
 
-            # 5. Procesar DFs (usando config por hoja)
             data_cliente = self._process_dataframe(df_cliente, start_row_cliente, cliente_config)
-            print("Data Cliente Procesada:\n", data_cliente)  # Línea de depuración
             data_salida = self._process_dataframe(df_salida, start_row_salida, salida_config)
-            print("\nData Salida Procesada:\n", data_salida)  # Línea de depuración
 
             if not data_cliente:
                  self.inconsistencias.append(f"ADVERTENCIA: No se extrajeron datos de Cliente en {sheet_context}.")
@@ -348,8 +341,9 @@ class ExcelComparator:
                     cliente_actual = cliente_item['actual'] if pd.notna(cliente_item['actual']) else 0
                     cliente_anterior = cliente_item['anterior'] if pd.notna(cliente_item['anterior']) else 0
                     if cliente_actual != 0 or cliente_anterior != 0:
+                        # --- ¡CAMBIO! Se añade la fila del cliente ---
                         self.inconsistencias.append(
-                            f"[{sheet_context}] '{cliente_item['full_title']}': Título FALTA en Salida (Valores Cliente: {cliente_actual}, {cliente_anterior})."
+                            f"[{sheet_context}] (Fila Cliente: {cliente_item['row_num']}) '{cliente_item['full_title']}': Título FALTA en Salida (Valores Cliente: {cliente_actual}, {cliente_anterior})."
                         )
             
             # 6.D. Reportar SOBRANTES en Salida
@@ -361,18 +355,17 @@ class ExcelComparator:
                         salida_scaled_actual = abs(int(round(salida_actual / 1000.0)))
                         salida_scaled_anterior = abs(int(round(salida_anterior / 1000.0)))
                         if salida_scaled_actual != 0 or salida_scaled_anterior != 0:
+                            # --- ¡CAMBIO! Se añade la fila de salida ---
                             self.inconsistencias.append(
-                                f"[{sheet_context}] '{salida_item['full_title']}': Título SOBRA en Salida, no existe en Cliente (Valores Salida escalados: {salida_scaled_actual}, {salida_scaled_anterior})."
+                                f"[{sheet_context}] (Fila Salida: {salida_item['row_num']}) '{salida_item['full_title']}': Título SOBRA en Salida, no existe en Cliente (Valores Salida escalados: {salida_scaled_actual}, {salida_scaled_anterior})."
                             )
 
         if not self.inconsistencias:
             return "--- PROCESO COMPLETADO --- \n\n¡No se encontraron inconsistencias!"
             
-        # Filtrar los mensajes de "OK" y "Detectando..." para mostrar solo los errores
         final_messages = [msg for msg in self.inconsistencias 
                           if not msg.startswith("  ->") and not msg.endswith("Detectando...")]
         
-        # Si la lista filtrada está vacía, no hubo problemas reales
         if not final_messages:
             return "--- PROCESO COMPLETADO --- \n\n¡No se encontraron inconsistencias!"
 
